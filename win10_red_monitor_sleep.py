@@ -4,13 +4,12 @@ import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox, ttk
+from typing import Optional
 
 try:
     from PIL import ImageGrab
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "缺少依赖 Pillow，请先执行: pip install pillow"
-    ) from exc
+except ImportError:  # pragma: no cover
+    ImageGrab = None
 
 
 @dataclass
@@ -198,6 +197,8 @@ class RedMonitorApp:
             time.sleep(max(0.02, self.check_interval.get() / 1000.0))
 
     def _get_red_ratio(self, region: Region) -> float:
+        if ImageGrab is None:
+            raise RuntimeError("缺少依赖 Pillow，请先执行: pip install pillow")
         img = ImageGrab.grab(bbox=(region.left, region.top, region.right, region.bottom))
         pixels = img.convert("RGB").getdata()
 
@@ -225,10 +226,37 @@ class RedMonitorApp:
 
 
 def main():
-    root = tk.Tk()
-    app = RedMonitorApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.stop)
-    root.mainloop()
+    root: Optional[tk.Tk] = None
+    try:
+        if ImageGrab is None:
+            raise RuntimeError("缺少依赖 Pillow，请先执行: pip install pillow")
+
+        root = tk.Tk()
+        app = RedMonitorApp(root)
+        root.protocol("WM_DELETE_WINDOW", app.stop)
+        root.mainloop()
+    except Exception as exc:  # pragma: no cover
+        _show_startup_error(str(exc), root)
+
+
+def _show_startup_error(message: str, root: Optional[tk.Tk]):
+    try:
+        if root is None:
+            temp_root = tk.Tk()
+            temp_root.withdraw()
+            messagebox.showerror("程序启动失败", f"{message}\n\n按回车可退出。")
+            temp_root.destroy()
+        else:
+            messagebox.showerror("程序启动失败", f"{message}\n\n按回车可退出。")
+    except Exception:
+        pass
+
+    print("\n程序启动失败：")
+    print(message)
+    print("\n常见原因：")
+    print("1) 没有安装 Pillow")
+    print("2) 不是在 Windows 图形桌面环境运行")
+    input("\n按回车键退出...")
 
 
 if __name__ == "__main__":

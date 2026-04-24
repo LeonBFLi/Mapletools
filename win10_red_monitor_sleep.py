@@ -2,15 +2,14 @@ import ctypes
 import threading
 import time
 import tkinter as tk
+import traceback
 from dataclasses import dataclass
 from tkinter import messagebox, ttk
 
 try:
     from PIL import ImageGrab
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "缺少依赖 Pillow，请先执行: pip install pillow"
-    ) from exc
+except ImportError:  # pragma: no cover
+    ImageGrab = None
 
 
 @dataclass
@@ -86,7 +85,7 @@ class RegionSelector(tk.Toplevel):
 class RedMonitorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Win10 红点监控自动休眠")
+        self.root.title("Win10 红点监控自动最小化")
         self.root.geometry("520x290")
 
         self.region = None
@@ -141,14 +140,14 @@ class RedMonitorApp:
         btn_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="立即测试休眠", command=self.trigger_sleep).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="立即测试最小化", command=self.trigger_minimize).pack(side=tk.LEFT)
 
         self.status = ttk.Label(container, text="状态：待机")
         self.status.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         tips = (
             "说明：当监控区域中检测到红色像素比例突然变化（跳动）时，"
-            "程序将发送休眠键并尝试关闭显示器。"
+            "程序将最小化当前前台窗口。"
         )
         ttk.Label(container, text=tips, foreground="gray40", wraplength=490).grid(
             row=6, column=0, columnspan=4, sticky="w", pady=(8, 0)
@@ -192,8 +191,8 @@ class RedMonitorApp:
                 cooling = (now - self.last_trigger) < self.cooldown.get()
                 if changed and has_red and not cooling:
                     self.last_trigger = now
-                    self.root.after(0, lambda: self.status.config(text=f"状态：触发休眠，红点比例 {ratio:.4f}"))
-                    self.trigger_sleep()
+                    self.root.after(0, lambda: self.status.config(text=f"状态：触发最小化，红点比例 {ratio:.4f}"))
+                    self.trigger_minimize()
             prev_ratio = ratio
             time.sleep(max(0.02, self.check_interval.get() / 1000.0))
 
@@ -212,29 +211,29 @@ class RedMonitorApp:
 
         return red_count / total if total else 0.0
 
-    def trigger_sleep(self):
-        self._send_sleep_key()
-        self._turn_off_monitor()
+    def trigger_minimize(self):
+        self._minimize_foreground_window()
 
     @staticmethod
-    def _send_sleep_key():
-        VK_SLEEP = 0x5F
-        KEYEVENTF_KEYUP = 0x0002
+    def _minimize_foreground_window():
+        SW_MINIMIZE = 6
         user32 = ctypes.windll.user32
-        user32.keybd_event(VK_SLEEP, 0, 0, 0)
-        user32.keybd_event(VK_SLEEP, 0, KEYEVENTF_KEYUP, 0)
-
-    @staticmethod
-    def _turn_off_monitor():
-        HWND_BROADCAST = 0xFFFF
-        WM_SYSCOMMAND = 0x0112
-        SC_MONITORPOWER = 0xF170
-        MONITOR_OFF = 2
-        user32 = ctypes.windll.user32
-        user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF)
+        hwnd = user32.GetForegroundWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
 
 
 def main():
+    if ImageGrab is None:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "缺少依赖",
+            "缺少 Pillow，请先在当前目录执行：\n\npip install pillow",
+        )
+        root.destroy()
+        return
+
     root = tk.Tk()
     app = RedMonitorApp(root)
     root.protocol("WM_DELETE_WINDOW", app.stop)
@@ -242,4 +241,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # pragma: no cover
+        detail = traceback.format_exc()
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("程序异常退出", f"请截图反馈以下错误：\n\n{detail}")
+        root.destroy()
+        raise

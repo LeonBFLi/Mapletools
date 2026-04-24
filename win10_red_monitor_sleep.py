@@ -1,14 +1,30 @@
+import logging
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Optional
 
 try:
     from PIL import ImageGrab
 except ImportError:  # pragma: no cover
     ImageGrab = None
+
+
+logger = logging.getLogger("red_monitor")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    file_handler = logging.FileHandler("red_monitor.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
 
 
 @dataclass
@@ -84,84 +100,121 @@ class RegionSelector(tk.Toplevel):
 class RedMonitorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Win10 红点监控自动最小化")
-        self.root.geometry("520x290")
+        self.root.title("Win10 红点监控自动中键点击")
+        self.root.geometry("640x420")
 
         self.region = None
         self.running = False
         self.worker = None
         self.last_trigger = 0.0
+        self.last_has_red = False
 
         self.red_threshold = tk.IntVar(value=220)
         self.delta_threshold = tk.IntVar(value=35)
         self.check_interval = tk.IntVar(value=120)
         self.cooldown = tk.IntVar(value=8)
         self.min_red_pixels = tk.IntVar(value=1)
-        self.alert_showing = False
 
         self._build_ui()
+        self._start_clock()
 
     def _build_ui(self):
         container = ttk.Frame(self.root, padding=12)
         container.pack(fill=tk.BOTH, expand=True)
 
+        top_info = ttk.Frame(container)
+        top_info.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        self.datetime_label = ttk.Label(top_info, text="系统时间：--")
+        self.datetime_label.pack(side=tk.LEFT)
+
         ttk.Button(container, text="选择监控区域", command=self.select_region).grid(
-            row=0, column=0, sticky="w"
+            row=1, column=0, sticky="w"
         )
         self.region_label = ttk.Label(container, text="尚未选择区域")
-        self.region_label.grid(row=0, column=1, columnspan=3, sticky="w", padx=8)
+        self.region_label.grid(row=1, column=1, columnspan=3, sticky="w", padx=8)
 
-        ttk.Label(container, text="红色阈值 (R >=)").grid(row=1, column=0, sticky="w", pady=8)
+        ttk.Label(container, text="红色阈值 (R >=)").grid(row=2, column=0, sticky="w", pady=8)
         ttk.Entry(container, textvariable=self.red_threshold, width=8).grid(
-            row=1, column=1, sticky="w"
-        )
-
-        ttk.Label(container, text="红色优势 (R-G/B >=)").grid(row=1, column=2, sticky="w")
-        ttk.Entry(container, textvariable=self.delta_threshold, width=8).grid(
-            row=1, column=3, sticky="w"
-        )
-
-        ttk.Label(container, text="最少红像素数量").grid(row=2, column=0, sticky="w", pady=8)
-        ttk.Entry(container, textvariable=self.min_red_pixels, width=8).grid(
             row=2, column=1, sticky="w"
         )
 
-        ttk.Label(container, text="检测间隔(ms)").grid(row=2, column=2, sticky="w")
-        ttk.Entry(container, textvariable=self.check_interval, width=8).grid(
+        ttk.Label(container, text="红色优势 (R-G/B >=)").grid(row=2, column=2, sticky="w")
+        ttk.Entry(container, textvariable=self.delta_threshold, width=8).grid(
             row=2, column=3, sticky="w"
         )
 
-        ttk.Label(container, text="触发冷却(秒)").grid(row=3, column=0, sticky="w", pady=8)
-        ttk.Entry(container, textvariable=self.cooldown, width=8).grid(
+        ttk.Label(container, text="最少红像素数量").grid(row=3, column=0, sticky="w", pady=8)
+        ttk.Entry(container, textvariable=self.min_red_pixels, width=8).grid(
             row=3, column=1, sticky="w"
         )
 
+        ttk.Label(container, text="检测间隔(ms)").grid(row=3, column=2, sticky="w")
+        ttk.Entry(container, textvariable=self.check_interval, width=8).grid(
+            row=3, column=3, sticky="w"
+        )
+
+        ttk.Label(container, text="触发冷却(秒)").grid(row=4, column=0, sticky="w", pady=8)
+        ttk.Entry(container, textvariable=self.cooldown, width=8).grid(
+            row=4, column=1, sticky="w"
+        )
+
         btn_row = ttk.Frame(container)
-        btn_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=10)
+        btn_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="立即测试弹窗", command=self.trigger_minimize).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="立即测试中键", command=self.trigger_middle_click).pack(side=tk.LEFT)
 
         self.status = ttk.Label(container, text="状态：待机")
-        self.status.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.status.grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         tips = (
-            "说明：只要监控区域中出现满足阈值的红色像素，"
-            "程序会弹出最高优先级提示框（含“确定”按钮）。"
+            "说明（更易理解）：\n"
+            "当监控区域里出现“明显偏红”的像素，且数量达到“最少红像素数量”时，\n"
+            "程序会：1) 对该区域截图保存到脚本同目录；2) 自动按一下鼠标滚轮键（中键）。\n"
+            "当红点随后消失时，程序还会再自动按一下鼠标中键，并记录日志。"
         )
-        ttk.Label(container, text=tips, foreground="gray40", wraplength=490).grid(
-            row=6, column=0, columnspan=4, sticky="w", pady=(8, 0)
+        ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
+            row=7, column=0, columnspan=4, sticky="w", pady=(8, 0)
         )
+
+        log_frame = ttk.LabelFrame(container, text="运行日志")
+        log_frame.grid(row=8, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        self.log_text = tk.Text(log_frame, height=8, wrap="word")
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.configure(state="disabled")
+
+        for col in range(4):
+            container.columnconfigure(col, weight=1)
+        container.rowconfigure(8, weight=1)
+
+    def _start_clock(self):
+        self._update_clock()
+
+    def _update_clock(self):
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.datetime_label.config(text=f"系统时间：{now_text}")
+        self.root.after(1000, self._update_clock)
+
+    def _append_log(self, message: str):
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{now_text}] {message}\n"
+        logger.info(message)
+        self.log_text.configure(state="normal")
+        self.log_text.insert(tk.END, line)
+        self.log_text.see(tk.END)
+        self.log_text.configure(state="disabled")
 
     def select_region(self):
         RegionSelector(self.root, self._on_region_selected)
 
     def _on_region_selected(self, region: Region):
         self.region = region
-        self.region_label.config(
-            text=f"({region.left},{region.top})-({region.right},{region.bottom}) "
+        region_text = (
+            f"({region.left},{region.top})-({region.right},{region.bottom}) "
             f"{region.width}x{region.height}"
         )
+        self.region_label.config(text=region_text)
+        self._append_log(f"已更新监控区域：{region_text}")
 
     def start(self):
         if self.running:
@@ -171,13 +224,16 @@ class RedMonitorApp:
             return
 
         self.running = True
+        self.last_has_red = False
         self.status.config(text="状态：监控中")
+        self._append_log("开始监控")
         self.worker = threading.Thread(target=self.monitor_loop, daemon=True)
         self.worker.start()
 
     def stop(self):
         self.running = False
         self.status.config(text="状态：已停止")
+        self._append_log("停止监控")
 
     def monitor_loop(self):
         while self.running:
@@ -194,11 +250,25 @@ class RedMonitorApp:
                         current_count, current_ratio
                     ),
                 )
+
+            if self.last_has_red and not has_enough_red:
+                self.root.after(0, self._on_disappeared)
+
+            self.last_has_red = has_enough_red
             time.sleep(max(0.02, self.check_interval.get() / 1000.0))
 
     def _on_detected(self, red_count: int, ratio: float):
         self.status.config(text=f"状态：检测到红点 {red_count}px，占比 {ratio:.4f}")
-        self.trigger_alert()
+        saved_path = self.capture_target_region()
+        self._append_log(f"检测到红点：{red_count}px，占比 {ratio:.4f}")
+        if saved_path:
+            self._append_log(f"区域截图已保存：{saved_path}")
+        self.trigger_middle_click("检测到红点")
+
+    def _on_disappeared(self):
+        self.status.config(text="状态：红点已消失")
+        self._append_log("检测到红点消失")
+        self.trigger_middle_click("红点消失")
 
     def _get_red_stats(self, region: Region) -> tuple[int, float]:
         if ImageGrab is None:
@@ -217,80 +287,33 @@ class RedMonitorApp:
 
         return red_count, (red_count / total if total else 0.0)
 
-    def trigger_minimize(self):
-        self.trigger_alert()
+    def capture_target_region(self) -> str:
+        if ImageGrab is None or self.region is None:
+            return ""
+        script_dir = Path(__file__).resolve().parent
+        filename = datetime.now().strftime("red_region_%Y%m%d_%H%M%S.png")
+        save_path = script_dir / filename
+        img = ImageGrab.grab(
+            bbox=(self.region.left, self.region.top, self.region.right, self.region.bottom)
+        )
+        img.save(save_path)
+        return str(save_path)
 
-    def trigger_alert(self):
-        if self.alert_showing:
-            return
+    def trigger_middle_click(self, reason: str = "手动测试"):
+        try:
+            import ctypes
 
-        self.alert_showing = True
-        dialog = tk.Toplevel(self.root)
-        dialog.title("红点提醒")
-        dialog.geometry("340x160")
-        dialog.attributes("-topmost", True)
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        frame = ttk.Frame(dialog, padding=18)
-        frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(
-            frame,
-            text="检测到红点，请确认。",
-            anchor="center",
-            justify="center",
-            font=("Microsoft YaHei UI", 11),
-        ).pack(fill=tk.X, pady=(8, 18))
-
-        def on_close():
-            self.alert_showing = False
-            dialog.grab_release()
-            dialog.destroy()
-
-        confirm_btn = ttk.Button(frame, text="确定", command=on_close)
-        confirm_btn.pack(anchor="center")
-
-        dialog.protocol("WM_DELETE_WINDOW", on_close)
-        dialog.bind("<Return>", lambda _: on_close())
-        dialog.bind("<Escape>", lambda _: on_close())
-        dialog.lift()
-        dialog.focus_force()
-        confirm_btn.focus_set()
-
-
-def main():
-    root: Optional[tk.Tk] = None
-    try:
-        if ImageGrab is None:
-            raise RuntimeError("缺少依赖 Pillow，请先执行: pip install pillow")
-
-        root = tk.Tk()
-        app = RedMonitorApp(root)
-        root.protocol("WM_DELETE_WINDOW", app.stop)
-        root.mainloop()
-    except Exception as exc:  # pragma: no cover
-        _show_startup_error(str(exc), root)
-
-
-def _show_startup_error(message: str, root: Optional[tk.Tk]):
-    try:
-        if root is None:
-            temp_root = tk.Tk()
-            temp_root.withdraw()
-            messagebox.showerror("程序启动失败", f"{message}\n\n按回车可退出。")
-            temp_root.destroy()
-        else:
-            messagebox.showerror("程序启动失败", f"{message}\n\n按回车可退出。")
-    except Exception:
-        pass
-
-    print("\n程序启动失败：")
-    print(message)
-    print("\n常见原因：")
-    print("1) 没有安装 Pillow")
-    print("2) 不是在 Windows 图形桌面环境运行")
-    input("\n按回车键退出...")
+            mouse_event = ctypes.windll.user32.mouse_event
+            middle_down = 0x0020
+            middle_up = 0x0040
+            mouse_event(middle_down, 0, 0, 0, 0)
+            mouse_event(middle_up, 0, 0, 0, 0)
+            self._append_log(f"已自动按下鼠标中键（原因：{reason}）")
+        except Exception as exc:  # pragma: no cover
+            self._append_log(f"中键点击失败（原因：{reason}）：{exc}")
 
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = RedMonitorApp(root)
+    root.mainloop()

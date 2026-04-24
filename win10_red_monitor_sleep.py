@@ -1,4 +1,3 @@
-import ctypes
 import threading
 import time
 import tkinter as tk
@@ -97,7 +96,8 @@ class RedMonitorApp:
         self.delta_threshold = tk.IntVar(value=35)
         self.check_interval = tk.IntVar(value=120)
         self.cooldown = tk.IntVar(value=8)
-        self.pixel_ratio_threshold = tk.DoubleVar(value=0.001)
+        self.min_red_pixels = tk.IntVar(value=1)
+        self.alert_showing = False
 
         self._build_ui()
 
@@ -121,8 +121,8 @@ class RedMonitorApp:
             row=1, column=3, sticky="w"
         )
 
-        ttk.Label(container, text="红点比例阈值").grid(row=2, column=0, sticky="w", pady=8)
-        ttk.Entry(container, textvariable=self.pixel_ratio_threshold, width=8).grid(
+        ttk.Label(container, text="最少红像素数量").grid(row=2, column=0, sticky="w", pady=8)
+        ttk.Entry(container, textvariable=self.min_red_pixels, width=8).grid(
             row=2, column=1, sticky="w"
         )
 
@@ -140,14 +140,14 @@ class RedMonitorApp:
         btn_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="立即测试最小化", command=self.trigger_minimize).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="立即测试弹窗", command=self.trigger_minimize).pack(side=tk.LEFT)
 
         self.status = ttk.Label(container, text="状态：待机")
         self.status.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         tips = (
-            "说明：当监控区域中检测到红色像素比例突然变化（跳动）时，"
-            "程序将最小化当前前台窗口。"
+            "说明：只要监控区域中出现满足阈值的红色像素，"
+            "程序会弹出最高优先级提示框（含“确定”按钮）。"
         )
         ttk.Label(container, text=tips, foreground="gray40", wraplength=490).grid(
             row=6, column=0, columnspan=4, sticky="w", pady=(8, 0)
@@ -180,23 +180,27 @@ class RedMonitorApp:
         self.status.config(text="状态：已停止")
 
     def monitor_loop(self):
-        prev_ratio = None
-
         while self.running:
-            ratio = self._get_red_ratio(self.region)
-            if prev_ratio is not None:
-                changed = abs(ratio - prev_ratio) >= self.pixel_ratio_threshold.get()
-                has_red = ratio > 0
-                now = time.time()
-                cooling = (now - self.last_trigger) < self.cooldown.get()
-                if changed and has_red and not cooling:
-                    self.last_trigger = now
-                    self.root.after(0, lambda: self.status.config(text=f"状态：触发最小化，红点比例 {ratio:.4f}"))
-                    self.trigger_minimize()
-            prev_ratio = ratio
+            red_count, ratio = self._get_red_stats(self.region)
+            now = time.time()
+            cooling = (now - self.last_trigger) < self.cooldown.get()
+            has_enough_red = red_count >= max(1, self.min_red_pixels.get())
+
+            if has_enough_red and not cooling:
+                self.last_trigger = now
+                self.root.after(
+                    0,
+                    lambda current_ratio=ratio, current_count=red_count: self._on_detected(
+                        current_count, current_ratio
+                    ),
+                )
             time.sleep(max(0.02, self.check_interval.get() / 1000.0))
 
-    def _get_red_ratio(self, region: Region) -> float:
+    def _on_detected(self, red_count: int, ratio: float):
+        self.status.config(text=f"状态：检测到红点 {red_count}px，占比 {ratio:.4f}")
+        self.trigger_alert()
+
+    def _get_red_stats(self, region: Region) -> tuple[int, float]:
         if ImageGrab is None:
             raise RuntimeError("缺少依赖 Pillow，请先执行: pip install pillow")
         img = ImageGrab.grab(bbox=(region.left, region.top, region.right, region.bottom))
@@ -211,18 +215,47 @@ class RedMonitorApp:
             if r >= red_th and (r - g) >= delta and (r - b) >= delta:
                 red_count += 1
 
-        return red_count / total if total else 0.0
+        return red_count, (red_count / total if total else 0.0)
 
     def trigger_minimize(self):
-        self._minimize_foreground_window()
+        self.trigger_alert()
 
-    @staticmethod
-    def _minimize_foreground_window():
-        SW_MINIMIZE = 6
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if hwnd:
-            user32.ShowWindow(hwnd, SW_MINIMIZE)
+    def trigger_alert(self):
+        if self.alert_showing:
+            return
+
+        self.alert_showing = True
+        dialog = tk.Toplevel(self.root)
+        dialog.title("红点提醒")
+        dialog.geometry("340x160")
+        dialog.attributes("-topmost", True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=18)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            frame,
+            text="检测到红点，请确认。",
+            anchor="center",
+            justify="center",
+            font=("Microsoft YaHei UI", 11),
+        ).pack(fill=tk.X, pady=(8, 18))
+
+        def on_close():
+            self.alert_showing = False
+            dialog.grab_release()
+            dialog.destroy()
+
+        confirm_btn = ttk.Button(frame, text="确定", command=on_close)
+        confirm_btn.pack(anchor="center")
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+        dialog.bind("<Return>", lambda _: on_close())
+        dialog.bind("<Escape>", lambda _: on_close())
+        dialog.lift()
+        dialog.focus_force()
+        confirm_btn.focus_set()
 
 
 def main():

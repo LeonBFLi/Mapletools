@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,17 @@ if not logger.handlers:
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
+
+
+def set_dpi_awareness():
+    """提升 Win10/11 下高 DPI 缩放时的坐标准确性。"""
+    try:
+        import ctypes
+
+        # Windows 10+ 推荐 API
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:  # pragma: no cover
+        pass
 
 
 @dataclass
@@ -51,6 +63,8 @@ class RegionSelector(tk.Toplevel):
         self.callback = callback
         self.start_x = 0
         self.start_y = 0
+        self.start_root_x = 0
+        self.start_root_y = 0
         self.rect_id = None
 
         self.attributes("-fullscreen", True)
@@ -68,6 +82,7 @@ class RegionSelector(tk.Toplevel):
 
     def on_press(self, event):
         self.start_x, self.start_y = event.x, event.y
+        self.start_root_x, self.start_root_y = event.x_root, event.y_root
         if self.rect_id:
             self.canvas.delete(self.rect_id)
         self.rect_id = self.canvas.create_rectangle(
@@ -84,10 +99,10 @@ class RegionSelector(tk.Toplevel):
             self.canvas.coords(self.rect_id, self.start_x, self.start_y, event.x, event.y)
 
     def on_release(self, event):
-        left = min(self.start_x, event.x)
-        top = min(self.start_y, event.y)
-        right = max(self.start_x, event.x)
-        bottom = max(self.start_y, event.y)
+        left = min(self.start_root_x, event.x_root)
+        top = min(self.start_root_y, event.y_root)
+        right = max(self.start_root_x, event.x_root)
+        bottom = max(self.start_root_y, event.y_root)
 
         if right - left < 5 or bottom - top < 5:
             messagebox.showwarning("区域太小", "请至少选择 5x5 像素区域")
@@ -111,6 +126,11 @@ class RedMonitorApp:
 
         self.red_threshold = tk.IntVar(value=220)
         self.delta_threshold = tk.IntVar(value=35)
+        self.green_max = tk.IntVar(value=90)
+        self.blue_max = tk.IntVar(value=90)
+        self.min_saturation = tk.IntVar(value=150)
+        self.min_blob_pixels = tk.IntVar(value=14)
+        self.min_blob_density = tk.IntVar(value=55)
         self.check_interval = tk.IntVar(value=120)
         self.cooldown = tk.IntVar(value=8)
         self.min_red_pixels = tk.IntVar(value=1)
@@ -143,29 +163,51 @@ class RedMonitorApp:
             row=2, column=3, sticky="w"
         )
 
-        ttk.Label(container, text="最少红像素数量").grid(row=3, column=0, sticky="w", pady=8)
-        ttk.Entry(container, textvariable=self.min_red_pixels, width=8).grid(
-            row=3, column=1, sticky="w"
-        )
+        ttk.Label(container, text="G/B 上限 (忽略类红)").grid(row=3, column=0, sticky="w", pady=8)
+        gb_frame = ttk.Frame(container)
+        gb_frame.grid(row=3, column=1, sticky="w")
+        ttk.Entry(gb_frame, textvariable=self.green_max, width=6).pack(side=tk.LEFT)
+        ttk.Label(gb_frame, text="/").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(gb_frame, textvariable=self.blue_max, width=6).pack(side=tk.LEFT)
 
-        ttk.Label(container, text="检测间隔(ms)").grid(row=3, column=2, sticky="w")
-        ttk.Entry(container, textvariable=self.check_interval, width=8).grid(
+        ttk.Label(container, text="最小饱和度(0-255)").grid(row=3, column=2, sticky="w")
+        ttk.Entry(container, textvariable=self.min_saturation, width=8).grid(
             row=3, column=3, sticky="w"
         )
 
-        ttk.Label(container, text="触发冷却(秒)").grid(row=4, column=0, sticky="w", pady=8)
-        ttk.Entry(container, textvariable=self.cooldown, width=8).grid(
+        ttk.Label(container, text="最少红像素数量").grid(row=4, column=0, sticky="w", pady=8)
+        ttk.Entry(container, textvariable=self.min_red_pixels, width=8).grid(
             row=4, column=1, sticky="w"
         )
 
+        ttk.Label(container, text="最小红团像素/密度%").grid(row=4, column=2, sticky="w")
+        blob_frame = ttk.Frame(container)
+        blob_frame.grid(row=4, column=3, sticky="w")
+        ttk.Entry(blob_frame, textvariable=self.min_blob_pixels, width=6).pack(side=tk.LEFT)
+        ttk.Label(blob_frame, text="/").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(blob_frame, textvariable=self.min_blob_density, width=6).pack(side=tk.LEFT)
+
+        ttk.Label(container, text="检测间隔(ms)").grid(row=5, column=0, sticky="w")
+        ttk.Entry(container, textvariable=self.check_interval, width=8).grid(
+            row=5, column=1, sticky="w"
+        )
+
+        ttk.Label(container, text="触发冷却(秒)").grid(row=5, column=2, sticky="w", pady=8)
+        ttk.Entry(container, textvariable=self.cooldown, width=8).grid(
+            row=5, column=3, sticky="w"
+        )
+
         btn_row = ttk.Frame(container)
-        btn_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=10)
+        btn_row.grid(row=6, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
         ttk.Button(btn_row, text="立即测试中键", command=self.trigger_middle_click).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="套用大红点推荐参数", command=self.apply_big_red_preset).pack(
+            side=tk.LEFT, padx=8
+        )
 
         self.status = ttk.Label(container, text="状态：待机")
-        self.status.grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.status.grid(row=7, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         tips = (
             "说明（更易理解）：\n"
@@ -174,18 +216,30 @@ class RedMonitorApp:
             "当红点随后消失时，程序还会再自动按一下鼠标中键，并记录日志。"
         )
         ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
-            row=7, column=0, columnspan=4, sticky="w", pady=(8, 0)
+            row=8, column=0, columnspan=4, sticky="w", pady=(8, 0)
         )
 
         log_frame = ttk.LabelFrame(container, text="运行日志")
-        log_frame.grid(row=8, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        log_frame.grid(row=9, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         self.log_text = tk.Text(log_frame, height=8, wrap="word")
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state="disabled")
 
         for col in range(4):
             container.columnconfigure(col, weight=1)
-        container.rowconfigure(8, weight=1)
+        container.rowconfigure(9, weight=1)
+
+    def apply_big_red_preset(self):
+        """按用户示例里的大红圆点调优，尽量排除其他偏红元素。"""
+        self.red_threshold.set(215)
+        self.delta_threshold.set(95)
+        self.green_max.set(95)
+        self.blue_max.set(95)
+        self.min_saturation.set(160)
+        self.min_red_pixels.set(18)
+        self.min_blob_pixels.set(14)
+        self.min_blob_density.set(55)
+        self._append_log("已套用“大红点”推荐参数（已增强去干扰能力）")
 
     def _start_clock(self):
         self._update_clock()
@@ -278,14 +332,73 @@ class RedMonitorApp:
 
         red_th = self.red_threshold.get()
         delta = self.delta_threshold.get()
+        green_max = self.green_max.get()
+        blue_max = self.blue_max.get()
+        sat_min = self.min_saturation.get()
+        min_blob_pixels = max(1, self.min_blob_pixels.get())
+        min_blob_density = max(1, self.min_blob_density.get()) / 100.0
 
-        red_count = 0
-        total = region.width * region.height
-        for r, g, b in pixels:
-            if r >= red_th and (r - g) >= delta and (r - b) >= delta:
-                red_count += 1
+        width = region.width
+        height = region.height
 
-        return red_count, (red_count / total if total else 0.0)
+        candidate = [False] * (width * height)
+        for idx, (r, g, b) in enumerate(pixels):
+            max_c = max(r, g, b)
+            min_c = min(r, g, b)
+            sat_255 = int(((max_c - min_c) / max_c) * 255) if max_c else 0
+            is_target_red = (
+                r >= red_th
+                and g <= green_max
+                and b <= blue_max
+                and (r - g) >= delta
+                and (r - b) >= delta
+                and sat_255 >= sat_min
+            )
+            candidate[idx] = is_target_red
+
+        # 只统计“连成团”的大红点，过滤零散或细碎的红色元素
+        visited = [False] * (width * height)
+        valid_red_count = 0
+        neighbors = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+
+        for idx, is_red in enumerate(candidate):
+            if not is_red or visited[idx]:
+                continue
+
+            q = deque([idx])
+            visited[idx] = True
+            comp_size = 0
+            min_x = width
+            min_y = height
+            max_x = 0
+            max_y = 0
+
+            while q:
+                cur = q.popleft()
+                y, x = divmod(cur, width)
+                comp_size += 1
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+
+                for dx, dy in neighbors:
+                    nx = x + dx
+                    ny = y + dy
+                    if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                        continue
+                    nidx = ny * width + nx
+                    if candidate[nidx] and not visited[nidx]:
+                        visited[nidx] = True
+                        q.append(nidx)
+
+            bbox_area = (max_x - min_x + 1) * (max_y - min_y + 1)
+            density = (comp_size / bbox_area) if bbox_area else 0.0
+            if comp_size >= min_blob_pixels and density >= min_blob_density:
+                valid_red_count += comp_size
+
+        total = width * height
+        return valid_red_count, (valid_red_count / total if total else 0.0)
 
     def capture_target_region(self) -> str:
         if ImageGrab is None or self.region is None:
@@ -314,6 +427,7 @@ class RedMonitorApp:
 
 
 if __name__ == "__main__":
+    set_dpi_awareness()
     root = tk.Tk()
     app = RedMonitorApp(root)
     root.mainloop()

@@ -122,7 +122,9 @@ class RedMonitorApp:
         self.running = False
         self.worker = None
         self.last_trigger = 0.0
-        self.last_has_red = False
+        self.restore_delay = tk.IntVar(value=20)
+        self._restore_cycle_active = False
+        self._last_minimized_hwnd = 0
 
         self.red_threshold = tk.IntVar(value=220)
         self.delta_threshold = tk.IntVar(value=35)
@@ -197,8 +199,13 @@ class RedMonitorApp:
             row=5, column=3, sticky="w"
         )
 
+        ttk.Label(container, text="还原延时(秒)").grid(row=6, column=0, sticky="w")
+        ttk.Entry(container, textvariable=self.restore_delay, width=8).grid(
+            row=6, column=1, sticky="w"
+        )
+
         btn_row = ttk.Frame(container)
-        btn_row.grid(row=6, column=0, columnspan=4, sticky="w", pady=10)
+        btn_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
         ttk.Button(btn_row, text="立即测试最小化", command=self.minimize_active_window).pack(side=tk.LEFT)
@@ -207,27 +214,28 @@ class RedMonitorApp:
         )
 
         self.status = ttk.Label(container, text="状态：待机")
-        self.status.grid(row=7, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.status.grid(row=8, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         tips = (
             "说明（更易理解）：\n"
             "当监控区域里出现“明显偏红”的像素，且数量达到“最少红像素数量”时，\n"
             "程序会：1) 对该区域截图保存到脚本同目录；2) 自动最小化当前活动窗口。\n"
-            "当红点随后消失时，程序还会再自动执行一次最小化，并记录日志。"
+            "随后每隔“还原延时(秒)”自动还原最近最小化窗口并复检；\n"
+            "若仍有红点则继续截图+最小化，直到复检不再有红点为止。"
         )
         ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
-            row=8, column=0, columnspan=4, sticky="w", pady=(8, 0)
+            row=9, column=0, columnspan=4, sticky="w", pady=(8, 0)
         )
 
         log_frame = ttk.LabelFrame(container, text="运行日志")
-        log_frame.grid(row=9, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
-        self.log_text = tk.Text(log_frame, height=8, wrap="word")
+        log_frame.grid(row=10, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        self.log_text = tk.Text(log_frame, height=6, wrap="word")
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state="disabled")
 
         for col in range(4):
             container.columnconfigure(col, weight=1)
-        container.rowconfigure(9, weight=1)
+        container.rowconfigure(10, weight=1)
 
     def apply_big_red_preset(self):
         """按用户示例里的大红圆点调优，尽量排除其他偏红元素。"""
@@ -278,7 +286,8 @@ class RedMonitorApp:
             return
 
         self.running = True
-        self.last_has_red = False
+        self._restore_cycle_active = False
+        self._last_minimized_hwnd = 0
         self.status.config(text="状态：监控中")
         self._append_log("开始监控")
         self.worker = threading.Thread(target=self.monitor_loop, daemon=True)
@@ -286,6 +295,7 @@ class RedMonitorApp:
 
     def stop(self):
         self.running = False
+        self._restore_cycle_active = False
         self.status.config(text="状态：已停止")
         self._append_log("停止监控")
 
@@ -304,11 +314,6 @@ class RedMonitorApp:
                         current_count, current_ratio
                     ),
                 )
-
-            if self.last_has_red and not has_enough_red:
-                self.root.after(0, self._on_disappeared)
-
-            self.last_has_red = has_enough_red
             time.sleep(max(0.02, self.check_interval.get() / 1000.0))
 
     def _on_detected(self, red_count: int, ratio: float):
@@ -318,11 +323,9 @@ class RedMonitorApp:
         if saved_path:
             self._append_log(f"区域截图已保存：{saved_path}")
         self.minimize_active_window("检测到红点")
-
-    def _on_disappeared(self):
-        self.status.config(text="状态：红点已消失")
-        self._append_log("检测到红点消失")
-        self.minimize_active_window("红点消失")
+        if not self._restore_cycle_active:
+            self._restore_cycle_active = True
+            self._schedule_restore_cycle()
 
     def _get_red_stats(self, region: Region) -> tuple[int, float]:
         if ImageGrab is None:
@@ -421,11 +424,66 @@ class RedMonitorApp:
             if hwnd:
                 SW_MINIMIZE = 6
                 user32.ShowWindow(hwnd, SW_MINIMIZE)
+                self._last_minimized_hwnd = hwnd
                 self._append_log(f"已最小化当前活动窗口（原因：{reason}）")
             else:
                 self._append_log(f"未找到可最小化的活动窗口（原因：{reason}）")
         except Exception as exc:  # pragma: no cover
             self._append_log(f"最小化窗口失败（原因：{reason}）：{exc}")
+
+    def _schedule_restore_cycle(self):
+        if not self.running or not self._restore_cycle_active:
+            return
+        delay_seconds = max(1, self.restore_delay.get())
+        threading.Thread(
+            target=self._restore_cycle_worker, args=(delay_seconds,), daemon=True
+        ).start()
+
+    def _restore_cycle_worker(self, delay_seconds: int):
+        time.sleep(delay_seconds)
+        self.root.after(0, self._restore_and_recheck)
+
+    def _restore_and_recheck(self):
+        if not self.running or not self._restore_cycle_active:
+            return
+        restored = self.restore_last_minimized_window()
+        if not restored:
+            self._restore_cycle_active = False
+            return
+
+        red_count, ratio = self._get_red_stats(self.region)
+        has_enough_red = red_count >= max(1, self.min_red_pixels.get())
+        self.status.config(text=f"状态：还原后复检 红点 {red_count}px，占比 {ratio:.4f}")
+        self._append_log(f"还原后复检：{red_count}px，占比 {ratio:.4f}")
+
+        if has_enough_red:
+            saved_path = self.capture_target_region()
+            if saved_path:
+                self._append_log(f"区域截图已保存：{saved_path}")
+            self.minimize_active_window("还原后红点仍存在，继续最小化")
+            self._schedule_restore_cycle()
+        else:
+            self._restore_cycle_active = False
+            self.status.config(text="状态：还原后红点已消失")
+            self._append_log("还原后红点已消失，结束循环")
+
+    def restore_last_minimized_window(self) -> bool:
+        hwnd = self._last_minimized_hwnd
+        if not hwnd:
+            self._append_log("没有可还原的窗口句柄，停止循环")
+            return False
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+            self._append_log("已还原最近一次最小化的窗口")
+            return True
+        except Exception as exc:  # pragma: no cover
+            self._append_log(f"还原窗口失败：{exc}")
+            return False
 
 
 if __name__ == "__main__":

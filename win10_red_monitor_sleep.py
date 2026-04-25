@@ -115,7 +115,7 @@ class RegionSelector(tk.Toplevel):
 class RedMonitorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Win10 红点监控自动中键点击")
+        self.root.title("Win10 红点监控自动最小化窗口")
         self.root.geometry("640x420")
 
         self.region = None
@@ -201,7 +201,7 @@ class RedMonitorApp:
         btn_row.grid(row=6, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="立即测试中键", command=self.trigger_middle_click).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="立即测试最小化", command=self.minimize_active_window).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="套用大红点推荐参数", command=self.apply_big_red_preset).pack(
             side=tk.LEFT, padx=8
         )
@@ -212,8 +212,8 @@ class RedMonitorApp:
         tips = (
             "说明（更易理解）：\n"
             "当监控区域里出现“明显偏红”的像素，且数量达到“最少红像素数量”时，\n"
-            "程序会：1) 对该区域截图保存到脚本同目录；2) 自动按一下鼠标滚轮键（中键）。\n"
-            "当红点随后消失时，程序还会再自动按一下鼠标中键，并记录日志。"
+            "程序会：1) 对该区域截图保存到脚本同目录；2) 自动最小化当前活动窗口。\n"
+            "当红点随后消失时，程序还会再自动执行一次最小化，并记录日志。"
         )
         ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
             row=8, column=0, columnspan=4, sticky="w", pady=(8, 0)
@@ -317,12 +317,12 @@ class RedMonitorApp:
         self._append_log(f"检测到红点：{red_count}px，占比 {ratio:.4f}")
         if saved_path:
             self._append_log(f"区域截图已保存：{saved_path}")
-        self.trigger_middle_click("检测到红点")
+        self.minimize_active_window("检测到红点")
 
     def _on_disappeared(self):
         self.status.config(text="状态：红点已消失")
         self._append_log("检测到红点消失")
-        self.trigger_middle_click("红点消失")
+        self.minimize_active_window("红点消失")
 
     def _get_red_stats(self, region: Region) -> tuple[int, float]:
         if ImageGrab is None:
@@ -412,18 +412,20 @@ class RedMonitorApp:
         img.save(save_path)
         return str(save_path)
 
-    def trigger_middle_click(self, reason: str = "手动测试"):
+    def minimize_active_window(self, reason: str = "手动测试"):
         try:
             import ctypes
 
-            mouse_event = ctypes.windll.user32.mouse_event
-            middle_down = 0x0020
-            middle_up = 0x0040
-            mouse_event(middle_down, 0, 0, 0, 0)
-            mouse_event(middle_up, 0, 0, 0, 0)
-            self._append_log(f"已自动按下鼠标中键（原因：{reason}）")
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                SW_MINIMIZE = 6
+                user32.ShowWindow(hwnd, SW_MINIMIZE)
+                self._append_log(f"已最小化当前活动窗口（原因：{reason}）")
+            else:
+                self._append_log(f"未找到可最小化的活动窗口（原因：{reason}）")
         except Exception as exc:  # pragma: no cover
-            self._append_log(f"中键点击失败（原因：{reason}）：{exc}")
+            self._append_log(f"最小化窗口失败（原因：{reason}）：{exc}")
 
 
 if __name__ == "__main__":

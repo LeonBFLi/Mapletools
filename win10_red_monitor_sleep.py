@@ -207,7 +207,7 @@ class RedMonitorApp:
         btn_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="立即测试 Alt+Tab", command=self.switch_to_recent_window).pack(
+        ttk.Button(btn_row, text="3秒后测试 Alt+Tab", command=self.delayed_test_switch).pack(
             side=tk.LEFT
         )
         ttk.Button(btn_row, text="套用大红点推荐参数", command=self.apply_big_red_preset).pack(
@@ -320,12 +320,23 @@ class RedMonitorApp:
         self.status.config(text=f"状态：检测到红点 {red_count}px，占比 {ratio:.4f}")
         saved_path = self.capture_target_region()
         self._append_log(f"检测到红点：{red_count}px，占比 {ratio:.4f}")
+        self.play_alert_sound()
         if saved_path:
             self._append_log(f"区域截图已保存：{saved_path}")
         self.switch_to_recent_window("检测到红点")
         if not self._restore_cycle_active:
             self._restore_cycle_active = True
             self._schedule_restore_cycle()
+
+    def play_alert_sound(self):
+        """红点出现时播放轻微提示音，不影响原有动作。"""
+        try:
+            import winsound
+
+            winsound.Beep(950, 120)
+            self._append_log("已播放轻微提示音")
+        except Exception as exc:  # pragma: no cover
+            self._append_log(f"提示音播放失败：{exc}")
 
     def _get_red_stats(self, region: Region) -> tuple[int, float]:
         if ImageGrab is None:
@@ -430,6 +441,12 @@ class RedMonitorApp:
             self._append_log(f"已执行 Alt+Tab 切换窗口（原因：{reason}）")
         except Exception as exc:  # pragma: no cover
             self._append_log(f"Alt+Tab 切换失败（原因：{reason}）：{exc}")
+
+    def delayed_test_switch(self):
+        """界面测试按钮：延迟 3 秒后执行 Alt+Tab。"""
+        self._append_log("收到测试指令，将在 3 秒后执行 Alt+Tab")
+        self.status.config(text="状态：测试中（3秒后执行 Alt+Tab）")
+        self.root.after(3000, lambda: self.switch_to_recent_window("延迟3秒测试"))
 
     def _schedule_restore_cycle(self):
         if not self.running or not self._restore_cycle_active:

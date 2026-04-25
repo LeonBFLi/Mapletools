@@ -420,7 +420,11 @@ class RedMonitorApp:
             import ctypes
 
             user32 = ctypes.windll.user32
+            app_hwnd = self.root.winfo_id()
             hwnd = user32.GetForegroundWindow()
+            if hwnd == app_hwnd and self._is_window_alive(self._last_minimized_hwnd):
+                # 如果当前前台窗口是本程序，则优先继续处理上一次被最小化的外部窗口
+                hwnd = self._last_minimized_hwnd
             if hwnd:
                 SW_MINIMIZE = 6
                 user32.ShowWindow(hwnd, SW_MINIMIZE)
@@ -469,7 +473,7 @@ class RedMonitorApp:
 
     def restore_last_minimized_window(self) -> bool:
         hwnd = self._last_minimized_hwnd
-        if not hwnd:
+        if not self._is_window_alive(hwnd):
             self._append_log("没有可还原的窗口句柄，停止循环")
             return False
         try:
@@ -477,12 +481,26 @@ class RedMonitorApp:
 
             user32 = ctypes.windll.user32
             SW_RESTORE = 9
-            user32.ShowWindow(hwnd, SW_RESTORE)
+            SW_SHOW = 5
+            restored = bool(user32.ShowWindow(hwnd, SW_RESTORE))
+            if not restored:
+                # 已经是非最小化状态时 ShowWindow 可能返回 0，补一次显示以提高兼容性
+                user32.ShowWindow(hwnd, SW_SHOW)
             user32.SetForegroundWindow(hwnd)
-            self._append_log("已还原最近一次最小化的窗口")
+            self._append_log("已尝试还原最近一次最小化的窗口")
             return True
         except Exception as exc:  # pragma: no cover
             self._append_log(f"还原窗口失败：{exc}")
+            return False
+
+    def _is_window_alive(self, hwnd: int) -> bool:
+        if not hwnd:
+            return False
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.user32.IsWindow(hwnd))
+        except Exception:  # pragma: no cover
             return False
 
 

@@ -115,7 +115,7 @@ class RegionSelector(tk.Toplevel):
 class RedMonitorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Win10 红点监控自动最小化窗口")
+        self.root.title("Win10 红点监控自动切换窗口")
         self.root.geometry("640x420")
 
         self.region = None
@@ -124,7 +124,6 @@ class RedMonitorApp:
         self.last_trigger = 0.0
         self.restore_delay = tk.IntVar(value=20)
         self._restore_cycle_active = False
-        self._last_minimized_hwnd = 0
 
         self.red_threshold = tk.IntVar(value=220)
         self.delta_threshold = tk.IntVar(value=35)
@@ -208,7 +207,9 @@ class RedMonitorApp:
         btn_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="立即测试最小化", command=self.minimize_active_window).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="立即测试 Alt+Tab", command=self.switch_to_recent_window).pack(
+            side=tk.LEFT
+        )
         ttk.Button(btn_row, text="套用大红点推荐参数", command=self.apply_big_red_preset).pack(
             side=tk.LEFT, padx=8
         )
@@ -219,9 +220,9 @@ class RedMonitorApp:
         tips = (
             "说明（更易理解）：\n"
             "当监控区域里出现“明显偏红”的像素，且数量达到“最少红像素数量”时，\n"
-            "程序会：1) 对该区域截图保存到脚本同目录；2) 自动最小化当前活动窗口。\n"
-            "随后每隔“还原延时(秒)”自动还原最近最小化窗口并复检；\n"
-            "若仍有红点则继续截图+最小化，直到复检不再有红点为止。"
+            "程序会：1) 对该区域截图保存到脚本同目录；2) 自动按 Alt+Tab 切换到最近窗口。\n"
+            "随后每隔“还原延时(秒)”自动再按一次 Alt+Tab 切回原窗口并复检；\n"
+            "若仍有红点则继续截图+切换，直到复检不再有红点为止。"
         )
         ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
             row=9, column=0, columnspan=4, sticky="w", pady=(8, 0)
@@ -287,7 +288,6 @@ class RedMonitorApp:
 
         self.running = True
         self._restore_cycle_active = False
-        self._last_minimized_hwnd = 0
         self.status.config(text="状态：监控中")
         self._append_log("开始监控")
         self.worker = threading.Thread(target=self.monitor_loop, daemon=True)
@@ -322,7 +322,7 @@ class RedMonitorApp:
         self._append_log(f"检测到红点：{red_count}px，占比 {ratio:.4f}")
         if saved_path:
             self._append_log(f"区域截图已保存：{saved_path}")
-        self.minimize_active_window("检测到红点")
+        self.switch_to_recent_window("检测到红点")
         if not self._restore_cycle_active:
             self._restore_cycle_active = True
             self._schedule_restore_cycle()
@@ -415,25 +415,21 @@ class RedMonitorApp:
         img.save(save_path)
         return str(save_path)
 
-    def minimize_active_window(self, reason: str = "手动测试"):
+    def switch_to_recent_window(self, reason: str = "手动测试"):
         try:
             import ctypes
 
             user32 = ctypes.windll.user32
-            app_hwnd = self.root.winfo_id()
-            hwnd = user32.GetForegroundWindow()
-            if hwnd == app_hwnd and self._is_window_alive(self._last_minimized_hwnd):
-                # 如果当前前台窗口是本程序，则优先继续处理上一次被最小化的外部窗口
-                hwnd = self._last_minimized_hwnd
-            if hwnd:
-                SW_MINIMIZE = 6
-                user32.ShowWindow(hwnd, SW_MINIMIZE)
-                self._last_minimized_hwnd = hwnd
-                self._append_log(f"已最小化当前活动窗口（原因：{reason}）")
-            else:
-                self._append_log(f"未找到可最小化的活动窗口（原因：{reason}）")
+            KEYEVENTF_KEYUP = 0x0002
+            VK_MENU = 0x12  # Alt
+            VK_TAB = 0x09
+            user32.keybd_event(VK_MENU, 0, 0, 0)
+            user32.keybd_event(VK_TAB, 0, 0, 0)
+            user32.keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, 0)
+            user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+            self._append_log(f"已执行 Alt+Tab 切换窗口（原因：{reason}）")
         except Exception as exc:  # pragma: no cover
-            self._append_log(f"最小化窗口失败（原因：{reason}）：{exc}")
+            self._append_log(f"Alt+Tab 切换失败（原因：{reason}）：{exc}")
 
     def _schedule_restore_cycle(self):
         if not self.running or not self._restore_cycle_active:
@@ -450,10 +446,10 @@ class RedMonitorApp:
     def _restore_and_recheck(self):
         if not self.running or not self._restore_cycle_active:
             return
-        restored = self.restore_last_minimized_window()
-        if not restored:
-            self._restore_cycle_active = False
-            return
+
+        self.switch_to_recent_window("延时后切回复检")
+        # 给系统一个很短的焦点切换时间，避免刚切回就截图导致复检画面不同步
+        time.sleep(0.15)
 
         red_count, ratio = self._get_red_stats(self.region)
         has_enough_red = red_count >= max(1, self.min_red_pixels.get())
@@ -464,44 +460,12 @@ class RedMonitorApp:
             saved_path = self.capture_target_region()
             if saved_path:
                 self._append_log(f"区域截图已保存：{saved_path}")
-            self.minimize_active_window("还原后红点仍存在，继续最小化")
+            self.switch_to_recent_window("还原后红点仍存在，继续切换")
             self._schedule_restore_cycle()
         else:
             self._restore_cycle_active = False
             self.status.config(text="状态：还原后红点已消失")
             self._append_log("还原后红点已消失，结束循环")
-
-    def restore_last_minimized_window(self) -> bool:
-        hwnd = self._last_minimized_hwnd
-        if not self._is_window_alive(hwnd):
-            self._append_log("没有可还原的窗口句柄，停止循环")
-            return False
-        try:
-            import ctypes
-
-            user32 = ctypes.windll.user32
-            SW_RESTORE = 9
-            SW_SHOW = 5
-            restored = bool(user32.ShowWindow(hwnd, SW_RESTORE))
-            if not restored:
-                # 已经是非最小化状态时 ShowWindow 可能返回 0，补一次显示以提高兼容性
-                user32.ShowWindow(hwnd, SW_SHOW)
-            user32.SetForegroundWindow(hwnd)
-            self._append_log("已尝试还原最近一次最小化的窗口")
-            return True
-        except Exception as exc:  # pragma: no cover
-            self._append_log(f"还原窗口失败：{exc}")
-            return False
-
-    def _is_window_alive(self, hwnd: int) -> bool:
-        if not hwnd:
-            return False
-        try:
-            import ctypes
-
-            return bool(ctypes.windll.user32.IsWindow(hwnd))
-        except Exception:  # pragma: no cover
-            return False
 
 
 if __name__ == "__main__":

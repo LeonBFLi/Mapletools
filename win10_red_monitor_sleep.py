@@ -135,6 +135,7 @@ class RedMonitorApp:
         self.check_interval = tk.IntVar(value=120)
         self.cooldown = tk.IntVar(value=8)
         self.min_red_pixels = tk.IntVar(value=1)
+        self.action_mode = tk.StringVar(value="alt_tab")
 
         self._build_ui()
         self._start_clock()
@@ -202,12 +203,33 @@ class RedMonitorApp:
         ttk.Entry(container, textvariable=self.restore_delay, width=8).grid(
             row=6, column=1, sticky="w"
         )
+        ttk.Label(container, text="检测后执行动作").grid(row=6, column=2, sticky="w")
+        action_frame = ttk.Frame(container)
+        action_frame.grid(row=6, column=3, sticky="w")
+        ttk.Radiobutton(
+            action_frame,
+            text="关闭当前窗口",
+            value="close_window",
+            variable=self.action_mode,
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            action_frame,
+            text="Alt+Tab 切换",
+            value="alt_tab",
+            variable=self.action_mode,
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Radiobutton(
+            action_frame,
+            text="点击鼠标中键",
+            value="middle_click",
+            variable=self.action_mode,
+        ).pack(side=tk.LEFT)
 
         btn_row = ttk.Frame(container)
         btn_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=10)
         ttk.Button(btn_row, text="开始监控", command=self.start).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="停止监控", command=self.stop).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btn_row, text="3秒后测试 Alt+Tab", command=self.delayed_test_switch).pack(
+        ttk.Button(btn_row, text="3秒后测试动作", command=self.delayed_test_switch).pack(
             side=tk.LEFT
         )
         ttk.Button(btn_row, text="套用大红点推荐参数", command=self.apply_big_red_preset).pack(
@@ -220,8 +242,8 @@ class RedMonitorApp:
         tips = (
             "说明（更易理解）：\n"
             "当监控区域里出现“明显偏红”的像素，且数量达到“最少红像素数量”时，\n"
-            "程序会：1) 对该区域截图保存到脚本同目录；2) 自动按 Alt+Tab 切换到最近窗口。\n"
-            "随后每隔“还原延时(秒)”自动再按一次 Alt+Tab 切回原窗口并复检；\n"
+            "程序会：1) 对该区域截图保存到脚本同目录；2) 执行你在界面里选择的动作。\n"
+            "当动作为“Alt+Tab 切换”时，随后每隔“还原延时(秒)”自动再按一次 Alt+Tab 切回原窗口并复检；\n"
             "若仍有红点则继续截图+切换，直到复检不再有红点为止。"
         )
         ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
@@ -323,8 +345,8 @@ class RedMonitorApp:
         self.play_alert_sound()
         if saved_path:
             self._append_log(f"区域截图已保存：{saved_path}")
-        self.switch_to_recent_window("检测到红点")
-        if not self._restore_cycle_active:
+        self.perform_selected_action("检测到红点")
+        if self.action_mode.get() == "alt_tab" and not self._restore_cycle_active:
             self._restore_cycle_active = True
             self._schedule_restore_cycle()
 
@@ -442,11 +464,48 @@ class RedMonitorApp:
         except Exception as exc:  # pragma: no cover
             self._append_log(f"Alt+Tab 切换失败（原因：{reason}）：{exc}")
 
+    def close_foreground_window(self, reason: str = "手动测试"):
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            WM_CLOSE = 0x0010
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                self._append_log(f"已发送关闭当前窗口指令（原因：{reason}）")
+            else:
+                self._append_log(f"未找到前台窗口，无法关闭（原因：{reason}）")
+        except Exception as exc:  # pragma: no cover
+            self._append_log(f"关闭当前窗口失败（原因：{reason}）：{exc}")
+
+    def click_middle_button(self, reason: str = "手动测试"):
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            MOUSEEVENTF_MIDDLEDOWN = 0x0020
+            MOUSEEVENTF_MIDDLEUP = 0x0040
+            user32.mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0)
+            self._append_log(f"已执行鼠标中键点击（原因：{reason}）")
+        except Exception as exc:  # pragma: no cover
+            self._append_log(f"鼠标中键点击失败（原因：{reason}）：{exc}")
+
+    def perform_selected_action(self, reason: str = "手动测试"):
+        action = self.action_mode.get()
+        if action == "close_window":
+            self.close_foreground_window(reason)
+        elif action == "middle_click":
+            self.click_middle_button(reason)
+        else:
+            self.switch_to_recent_window(reason)
+
     def delayed_test_switch(self):
-        """界面测试按钮：延迟 3 秒后执行 Alt+Tab。"""
-        self._append_log("收到测试指令，将在 3 秒后执行 Alt+Tab")
-        self.status.config(text="状态：测试中（3秒后执行 Alt+Tab）")
-        self.root.after(3000, lambda: self.switch_to_recent_window("延迟3秒测试"))
+        """界面测试按钮：延迟 3 秒后执行当前选中的动作。"""
+        self._append_log("收到测试指令，将在 3 秒后执行当前动作")
+        self.status.config(text="状态：测试中（3秒后执行动作）")
+        self.root.after(3000, lambda: self.perform_selected_action("延迟3秒测试"))
 
     def _schedule_restore_cycle(self):
         if not self.running or not self._restore_cycle_active:

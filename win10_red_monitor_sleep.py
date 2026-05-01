@@ -122,8 +122,8 @@ class RedMonitorApp:
         self.running = False
         self.worker = None
         self.last_trigger = 0.0
-        self.restore_delay = tk.IntVar(value=20)
-        self._restore_cycle_active = False
+        self.restore_delay = tk.IntVar(value=60)
+        self._alt_tab_cycle_active = False
 
         self.red_threshold = tk.IntVar(value=220)
         self.delta_threshold = tk.IntVar(value=35)
@@ -224,6 +224,12 @@ class RedMonitorApp:
             value="middle_click",
             variable=self.action_mode,
         ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            action_frame,
+            text="关游戏并休眠",
+            value="close_and_sleep",
+            variable=self.action_mode,
+        ).pack(side=tk.LEFT, padx=6)
 
         btn_row = ttk.Frame(container)
         btn_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=10)
@@ -243,8 +249,9 @@ class RedMonitorApp:
             "说明（更易理解）：\n"
             "当监控区域里出现“明显偏红”的像素，且数量达到“最少红像素数量”时，\n"
             "程序会：1) 对该区域截图保存到脚本同目录；2) 执行你在界面里选择的动作。\n"
-            "当动作为“Alt+Tab 切换”时，随后每隔“还原延时(秒)”自动再按一次 Alt+Tab 切回原窗口并复检；\n"
-            "若仍有红点则继续截图+切换，直到复检不再有红点为止。"
+            "当动作为“Alt+Tab 切换”时，检测到红点会先截图并立即 Alt+Tab 切到另一个窗口，\n"
+            "暂停检测并在日志中显示 60 秒倒计时；倒计时结束后自动 Alt+Tab 切回原窗口复检。\n"
+            "若仍有红点则立刻再次 Alt+Tab 切走并重复上述流程。"
         )
         ttk.Label(container, text=tips, foreground="gray35", wraplength=610, justify="left").grid(
             row=9, column=0, columnspan=4, sticky="w", pady=(8, 0)
@@ -309,7 +316,7 @@ class RedMonitorApp:
             return
 
         self.running = True
-        self._restore_cycle_active = False
+        self._alt_tab_cycle_active = False
         self.status.config(text="状态：监控中")
         self._append_log("开始监控")
         self.worker = threading.Thread(target=self.monitor_loop, daemon=True)
@@ -317,7 +324,7 @@ class RedMonitorApp:
 
     def stop(self):
         self.running = False
-        self._restore_cycle_active = False
+        self._alt_tab_cycle_active = False
         self.status.config(text="状态：已停止")
         self._append_log("停止监控")
 
@@ -346,9 +353,9 @@ class RedMonitorApp:
         if saved_path:
             self._append_log(f"区域截图已保存：{saved_path}")
         self.perform_selected_action("检测到红点")
-        if self.action_mode.get() == "alt_tab" and not self._restore_cycle_active:
-            self._restore_cycle_active = True
-            self._schedule_restore_cycle()
+        if self.action_mode.get() == "alt_tab" and not self._alt_tab_cycle_active:
+            self._alt_tab_cycle_active = True
+            threading.Thread(target=self._alt_tab_cycle_worker, daemon=True).start()
 
     def play_alert_sound(self):
         """红点出现时播放轻微提示音，不影响原有动作。"""
@@ -486,9 +493,12 @@ class RedMonitorApp:
             user32 = ctypes.windll.user32
             MOUSEEVENTF_MIDDLEDOWN = 0x0020
             MOUSEEVENTF_MIDDLEUP = 0x0040
-            user32.mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0)
-            user32.mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0)
-            self._append_log(f"已执行鼠标中键点击（原因：{reason}）")
+            down_ret = user32.mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0)
+            up_ret = user32.mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0)
+            self._append_log(
+                f"已执行鼠标中键点击（原因：{reason}，返回值 down={down_ret}, up={up_ret}）"
+            )
+            self._append_log("提示：mouse_event 通常返回 0；请在目标程序中确认是否产生中键效果")
         except Exception as exc:  # pragma: no cover
             self._append_log(f"鼠标中键点击失败（原因：{reason}）：{exc}")
 
@@ -498,6 +508,8 @@ class RedMonitorApp:
             self.close_foreground_window(reason)
         elif action == "middle_click":
             self.click_middle_button(reason)
+        elif action == "close_and_sleep":
+            self.close_game_and_sleep(reason)
         else:
             self.switch_to_recent_window(reason)
 
@@ -507,41 +519,51 @@ class RedMonitorApp:
         self.status.config(text="状态：测试中（3秒后执行动作）")
         self.root.after(3000, lambda: self.perform_selected_action("延迟3秒测试"))
 
-    def _schedule_restore_cycle(self):
-        if not self.running or not self._restore_cycle_active:
-            return
-        delay_seconds = max(1, self.restore_delay.get())
-        threading.Thread(
-            target=self._restore_cycle_worker, args=(delay_seconds,), daemon=True
-        ).start()
+    def close_game_and_sleep(self, reason: str = "手动测试"):
+        self.close_foreground_window(f"{reason} - 关闭游戏")
+        time.sleep(0.8)
+        try:
+            import ctypes
 
-    def _restore_cycle_worker(self, delay_seconds: int):
-        time.sleep(delay_seconds)
-        self.root.after(0, self._restore_and_recheck)
+            powrprof = ctypes.windll.powrprof
+            ret = powrprof.SetSuspendState(False, True, False)
+            if ret:
+                self._append_log(f"已触发系统休眠（原因：{reason}）")
+            else:
+                self._append_log(f"触发系统休眠失败（原因：{reason}，返回值={ret}）")
+        except Exception as exc:  # pragma: no cover
+            self._append_log(f"触发系统休眠失败（原因：{reason}）：{exc}")
 
-    def _restore_and_recheck(self):
-        if not self.running or not self._restore_cycle_active:
-            return
+    def _alt_tab_cycle_worker(self):
+        while self.running and self._alt_tab_cycle_active and self.action_mode.get() == "alt_tab":
+            # 第一次由 _on_detected 触发，此处只负责等待后切回复检。
+            countdown = max(1, self.restore_delay.get())
+            while countdown > 0 and self.running and self._alt_tab_cycle_active:
+                self.root.after(0, lambda sec=countdown: self.status.config(text=f"状态：Alt+Tab 冷却中，{sec} 秒后复检"))
+                self.root.after(0, lambda sec=countdown: self._append_log(f"Alt+Tab 冷却倒计时：{sec} 秒"))
+                time.sleep(1)
+                countdown -= 1
 
-        self.switch_to_recent_window("延时后切回复检")
-        # 给系统一个很短的焦点切换时间，避免刚切回就截图导致复检画面不同步
-        time.sleep(0.15)
+            if not self.running or not self._alt_tab_cycle_active:
+                break
 
-        red_count, ratio = self._get_red_stats(self.region)
-        has_enough_red = red_count >= max(1, self.min_red_pixels.get())
-        self.status.config(text=f"状态：还原后复检 红点 {red_count}px，占比 {ratio:.4f}")
-        self._append_log(f"还原后复检：{red_count}px，占比 {ratio:.4f}")
+            self.root.after(0, lambda: self.switch_to_recent_window("倒计时结束，切回原窗口复检"))
+            time.sleep(0.2)
+            red_count, ratio = self._get_red_stats(self.region)
+            has_enough_red = red_count >= max(1, self.min_red_pixels.get())
+            self.root.after(0, lambda: self.status.config(text=f"状态：还原后复检 红点 {red_count}px，占比 {ratio:.4f}"))
+            self.root.after(0, lambda: self._append_log(f"还原后复检：{red_count}px，占比 {ratio:.4f}"))
 
-        if has_enough_red:
-            saved_path = self.capture_target_region()
-            if saved_path:
-                self._append_log(f"区域截图已保存：{saved_path}")
-            self.switch_to_recent_window("还原后红点仍存在，继续切换")
-            self._schedule_restore_cycle()
-        else:
-            self._restore_cycle_active = False
-            self.status.config(text="状态：还原后红点已消失")
-            self._append_log("还原后红点已消失，结束循环")
+            if has_enough_red:
+                saved_path = self.capture_target_region()
+                if saved_path:
+                    self.root.after(0, lambda: self._append_log(f"区域截图已保存：{saved_path}"))
+                self.root.after(0, lambda: self.switch_to_recent_window("复检仍有红点，立即切换到另一窗口"))
+                continue
+
+            self._alt_tab_cycle_active = False
+            self.root.after(0, lambda: self.status.config(text="状态：还原后红点已消失"))
+            self.root.after(0, lambda: self._append_log("还原后红点已消失，结束 Alt+Tab 循环"))
 
 
 if __name__ == "__main__":
